@@ -21,16 +21,18 @@ logger = logging.getLogger("TraceabilityRS")
 def get_employees_with_upcoming_test_end(conn):
     """Recupera i dipendenti con periodo di prova in scadenza"""
     query = """
-    select h.employeehirehistoryid, 
-           e.EmployeeSurname + ' ' + e.employeename + ' [CNP: ' + e.EmployeeNID + ']' as Employee, 
-           format(hiredate, 'd', 'ro-ro') AS HireDate, 
-           cast(TestPeriod as nvarchar(2)) + ' days' as TestPeriod, 
-           format(dateadd(DAY, [testPeriod], HireDate), 'd', 'ro-ro') as LastTestDate,
-           abs(datediff(DAY, dateadd(DAY, [testPeriod], HireDate), getdate())) as MissingDayAtEndTestDate
-    from employee.dbo.employees e 
-    inner join employee.dbo.employeehirehistory h on e.employeeid = h.EmployeeId and h.EmployeerId = 2
-    where datediff(DAY, dateadd(DAY, [testPeriod], HireDate), getdate()) between -30 and 0;
-    """
+            select h.employeehirehistoryid,
+                   e.EmployeeSurname + ' ' + e.employeename + ' [CNP: ' + e.EmployeeNID + ']' as Employee,
+                   format(hiredate, 'd', 'ro-ro')                                             AS HireDate,
+                   cast(TestPeriod as nvarchar(2)) + ' days'                                  as TestPeriod,
+                   format(dateadd(DAY, [testPeriod], HireDate), 'd', 'ro-ro')                 as LastTestDate,
+                   abs(datediff(DAY, dateadd(DAY, [testPeriod], HireDate), getdate()))        as MissingDayAtEndTestDate
+            from employee.dbo.employees e
+                     inner join employee.dbo.employeehirehistory h on e.employeeid = h.EmployeeId and h.EmployeerId = 2
+            left join [Employee].[dbo].[EmployeeEvaluationHistory] ev on ev.EmployeeHireHistoryId=h.EmployeeHireHistoryId
+where datediff(DAY,dateadd(DAY, [testPeriod],HireDate),getdate()) between -30 and 0
+and ev.IdValutazioneStorico is null;\
+            """
 
     try:
         with conn.cursor() as cursor:
@@ -63,23 +65,17 @@ def get_manager_emails(conn, employee_ids):
         return []
 
     try:
-        # Crea la tabella temporanea tipo
-        create_table_query = """
-        CREATE TYPE dbo.EmployeeIdTableType AS TABLE (EmployeeId INT);
-        """
+        # Creiamo una stringa con gli ID separati da virgola
+        id_list = ",".join([str(id) for id in employee_ids])
 
-        # Prepara gli ID per l'inserimento
-        id_values = ",".join([f"({id})" for id in employee_ids])
-
-        # Query per chiamare la stored procedure
+        # Query alternativa che non richiede il tipo di tabella
+        # Assumendo che la SP accetti una stringa di ID separati da virgola
         sp_query = f"""
-        DECLARE @Ids dbo.EmployeeIdTableType;
-        INSERT INTO @Ids VALUES {id_values};
-        EXEC GetManager @Ids;
+        EXEC GetManager @EmployeeIds = ?
         """
 
         with conn.cursor() as cursor:
-            cursor.execute(sp_query)
+            cursor.execute(sp_query, id_list)
             results = cursor.fetchall()
 
         emails = [row[0] for row in results if row[0] and '@' in row[0]]
@@ -88,7 +84,14 @@ def get_manager_emails(conn, employee_ids):
 
     except Exception as e:
         logger.error(f"Errore nel recupero email manager: {str(e)}")
-        return []
+
+        # Fallback: prova a recuperare email dai settings
+        try:
+            logger.info("Tentativo fallback: recupero email dai settings")
+            return get_email_recipients(conn, 'Sys_Email_Purchase')
+        except Exception as fallback_error:
+            logger.error(f"Anche il fallback ha fallito: {str(fallback_error)}")
+            return []
 
 
 def create_email_body(employees):
@@ -111,7 +114,7 @@ def create_email_body(employees):
     <body>
         <div class="header">
             <!-- Logo incorporato -->
-            <img src="cid:logo" alt="Company Logo" class="logo">
+            <img src="cid:Logo.png" alt="Company Logo" class="logo">
             <h2>Notifica Scadenza Periodo di Prova</h2>
             <p>Data generazione report: {datetime.now().strftime('%d.%m.%Y %H:%M')}</p>
         </div>
